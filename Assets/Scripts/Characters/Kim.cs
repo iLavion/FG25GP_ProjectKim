@@ -25,12 +25,17 @@ public class Kim : CharacterController
     private float pathUpdateTimer = 0f;
     private List<Grid.Tile> currentPath = new();
     private List<Zombie> zombiesInContext = new();
+    private List<Burger> burgersInScene = new();
     private bool isFleeing = false;
 
     public override void StartCharacter()
     {
         base.StartCharacter();
         pathUpdateTimer = 0f;
+        if (burgersInScene.Count == 0) {
+            Burger[] burgers = FindObjectsByType<Burger>(FindObjectsSortMode.None);
+            foreach (Burger b in burgers) burgersInScene.Add(b);
+        }
     }
 
     public override void UpdateCharacter()
@@ -56,45 +61,40 @@ public class Kim : CharacterController
 
     void TickBehaviorTree()
     {
-        if (TryFleeFromZombies()) return;
+        UpdateFleeFlag();
+        if (TryCollectNearestBurger()) return;
         TrySeekFinish();
     }
 
-    bool TryFleeFromZombies()
+    void UpdateFleeFlag()
     {
-        if (zombiesInContext.Count == 0 || myCurrentTile == null) {
-            isFleeing = false;
-            return false;
-        }
-        bool threatNear = false;
+        isFleeing = false;
         foreach (Zombie zombie in zombiesInContext) {
             if (zombie == null) continue;
-            float distance = Vector3.Distance(transform.position, zombie.transform.position);
-            if (distance < SoftAvoidDistance) {
-                threatNear = true;
+            if (Vector3.Distance(transform.position, zombie.transform.position) < SoftAvoidDistance) {
+                isFleeing = true;
                 break;
             }
         }
-        if (!threatNear) {
-            isFleeing = false;
-            return false;
-        }
-        bool pathSet = TrySetPathToFinish(zombiesInContext);
-        isFleeing = pathSet;
-        return pathSet;
     }
 
     bool TrySeekFinish()
     {
-        isFleeing = false;
-        return TrySetPathToFinish(zombiesInContext);
+        return TrySetPathToTarget(Grid.Instance.GetFinishTile(), zombiesInContext);
     }
 
-    bool TrySetPathToFinish(List<Zombie> avoid)
+    bool TryCollectNearestBurger()
     {
-        if (myCurrentTile == null) return false;
-        Grid.Tile targetTile = Grid.Instance.GetFinishTile();
-        if (targetTile == null) return false;
+        Grid.Tile burgerTile = GetNearestActiveBurgerTile();
+        if (burgerTile == null) return false;
+        bool pathSet = TrySetPathToTarget(burgerTile, zombiesInContext);
+        isFleeing = isFleeing || pathSet;
+        return pathSet;
+    }
+
+    bool TrySetPathToTarget(Grid.Tile targetTile, List<Zombie> avoid)
+    {
+        if (myCurrentTile == null || targetTile == null) return false;
         List<Grid.Tile> newPath = FindPathAStar(myCurrentTile, targetTile, avoid);
         if (newPath == null || newPath.Count == 0) return false;
         currentPath = newPath;
@@ -158,6 +158,23 @@ public class Kim : CharacterController
             }
         }
         return new List<Grid.Tile>();
+    }
+
+    Grid.Tile GetNearestActiveBurgerTile()
+    {
+        Grid.Tile nearest = null;
+        float bestDist = float.MaxValue;
+        foreach (Burger burger in burgersInScene) {
+            if (burger == null || !burger.gameObject.activeInHierarchy) continue;
+            Grid.Tile tile = Grid.Instance.GetClosest(burger.transform.position);
+            if (tile == null || tile.occupied) continue;
+            float dist = Vector3.Distance(transform.position, burger.transform.position);
+            if (dist < bestDist) {
+                bestDist = dist;
+                nearest = tile;
+            }
+        }
+        return nearest;
     }
 
     List<Grid.Tile> GetNeighbors(Grid.Tile tile) {
