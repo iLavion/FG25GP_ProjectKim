@@ -83,6 +83,9 @@ public class Kim : CharacterController
     List<Grid.Tile> FindPathAStar(Grid.Tile start, Grid.Tile goal, Vector3 zombiePosition) {
         if (start == null || goal == null) return new List<Grid.Tile>();
         bool avoidZombie = zombiePosition != Vector3.zero;
+        float hardAvoidRadius = ZombieDangerRadius * 0.6f;
+        float softAvoidRadius = ZombieDangerRadius * 1.5f;
+        float softPenalty = 5f;
         List<AStarNode> openList = new();
         HashSet<Grid.Tile> closedSet = new();
         Dictionary<Grid.Tile, AStarNode> allNodes = new();
@@ -97,12 +100,16 @@ public class Kim : CharacterController
             List<Grid.Tile> neighbors = GetNeighbors(currentNode.tile);
             foreach (Grid.Tile neighborTile in neighbors) {
                 if (closedSet.Contains(neighborTile) || neighborTile.occupied) continue;
+                float tentativeGCost = currentNode.gCost + GetDistance(currentNode.tile, neighborTile);
                 if (avoidZombie) {
                     Vector3 tilePos = Grid.Instance.WorldPos(neighborTile);
                     float distToZombie = Vector3.Distance(tilePos, zombiePosition);
-                    if (distToZombie < ZombieDangerRadius) continue;
+                    if (distToZombie < hardAvoidRadius) continue;
+                    if (distToZombie < softAvoidRadius) {
+                        float penaltyFactor = 1f - Mathf.InverseLerp(hardAvoidRadius, softAvoidRadius, distToZombie);
+                        tentativeGCost += softPenalty * penaltyFactor;
+                    }
                 }
-                float tentativeGCost = currentNode.gCost + GetDistance(currentNode.tile, neighborTile);
                 AStarNode neighborNode;
                 if (!allNodes.ContainsKey(neighborTile)) {
                     float hCost = GetHeuristic(neighborTile, goal);
@@ -135,7 +142,17 @@ public class Kim : CharacterController
         };
         foreach (Vector2Int dir in directions) {
             Grid.Tile neighbor = Grid.Instance.TryGetTile(new Vector2Int(tile.x + dir.x, tile.y + dir.y));
-            if (neighbor != null && !neighbor.occupied) neighbors.Add(neighbor);
+            if (neighbor == null || neighbor.occupied) continue;
+
+            bool isDiagonal = Mathf.Abs(dir.x) + Mathf.Abs(dir.y) == 2;
+            if (isDiagonal) {
+                // Prevent cutting corners through walls by requiring side tiles to be clear
+                Grid.Tile sideA = Grid.Instance.TryGetTile(new Vector2Int(tile.x + dir.x, tile.y));
+                Grid.Tile sideB = Grid.Instance.TryGetTile(new Vector2Int(tile.x, tile.y + dir.y));
+                if ((sideA != null && sideA.occupied) || (sideB != null && sideB.occupied)) continue;
+            }
+
+            neighbors.Add(neighbor);
         }
         return neighbors;
     }
