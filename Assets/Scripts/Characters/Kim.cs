@@ -24,14 +24,8 @@ public class Kim : CharacterController
 
     private float pathUpdateTimer = 0f;
     private List<Grid.Tile> currentPath = new();
-    private KimState currentState = KimState.SeekingFinish;
     private List<Zombie> zombiesInContext = new();
-
-    private enum KimState
-    {
-        SeekingFinish,
-        FleeingFromZombie
-    }
+    private bool isFleeing = false;
 
     public override void StartCharacter()
     {
@@ -45,57 +39,67 @@ public class Kim : CharacterController
         pathUpdateTimer -= Time.deltaTime;
         if (pathUpdateTimer <= 0f) {
             pathUpdateTimer = PathUpdateInterval;
-            UpdateStateMachine();
+            UpdateZombieContext();
+            TickBehaviorTree();
         }
     }
 
-    void UpdateStateMachine()
+    void UpdateZombieContext()
     {
         GameObject[] zombieObjects = GetContextByTag("Zombie");
         zombiesInContext.Clear();
-        bool anyZombieDangerous = false;
         foreach (GameObject zombieObj in zombieObjects) {
             Zombie zombie = zombieObj.GetComponent<Zombie>();
-            if (zombie != null) {
-                zombiesInContext.Add(zombie);
-                float distanceToZombie = Vector3.Distance(transform.position, zombie.transform.position);
-                if (distanceToZombie < SoftAvoidDistance) anyZombieDangerous = true;
-            }
-        }
-        currentState = anyZombieDangerous ? KimState.FleeingFromZombie : KimState.SeekingFinish;
-        switch (currentState) {
-            case KimState.SeekingFinish:
-                ExecuteSeekingFinish();
-                break;
-            case KimState.FleeingFromZombie:
-                ExecuteFleeingFromZombie();
-                break;
+            if (zombie != null) zombiesInContext.Add(zombie);
         }
     }
 
-    void ExecuteSeekingFinish()
+    void TickBehaviorTree()
     {
-        Grid.Tile targetTile = Grid.Instance.GetFinishTile();
-        if (targetTile != null && myCurrentTile != null) {
-            List<Grid.Tile> newPath = FindPathAStar(myCurrentTile, targetTile, zombiesInContext);
-            if (newPath != null && newPath.Count > 0) {
-                currentPath = newPath;
-                SetWalkBuffer(currentPath);
-            }
-        }
+        if (TryFleeFromZombies()) return;
+        TrySeekFinish();
     }
 
-    void ExecuteFleeingFromZombie()
+    bool TryFleeFromZombies()
     {
-        if (zombiesInContext.Count == 0 || myCurrentTile == null) return;
-        Grid.Tile targetTile = Grid.Instance.GetFinishTile();
-        if (targetTile != null) {
-            List<Grid.Tile> newPath = FindPathAStar(myCurrentTile, targetTile, zombiesInContext);
-            if (newPath != null && newPath.Count > 0) {
-                currentPath = newPath;
-                SetWalkBuffer(currentPath);
+        if (zombiesInContext.Count == 0 || myCurrentTile == null) {
+            isFleeing = false;
+            return false;
+        }
+        bool threatNear = false;
+        foreach (Zombie zombie in zombiesInContext) {
+            if (zombie == null) continue;
+            float distance = Vector3.Distance(transform.position, zombie.transform.position);
+            if (distance < SoftAvoidDistance) {
+                threatNear = true;
+                break;
             }
         }
+        if (!threatNear) {
+            isFleeing = false;
+            return false;
+        }
+        bool pathSet = TrySetPathToFinish(zombiesInContext);
+        isFleeing = pathSet;
+        return pathSet;
+    }
+
+    bool TrySeekFinish()
+    {
+        isFleeing = false;
+        return TrySetPathToFinish(zombiesInContext);
+    }
+
+    bool TrySetPathToFinish(List<Zombie> avoid)
+    {
+        if (myCurrentTile == null) return false;
+        Grid.Tile targetTile = Grid.Instance.GetFinishTile();
+        if (targetTile == null) return false;
+        List<Grid.Tile> newPath = FindPathAStar(myCurrentTile, targetTile, avoid);
+        if (newPath == null || newPath.Count == 0) return false;
+        currentPath = newPath;
+        SetWalkBuffer(currentPath);
+        return true;
     }
 
     List<Grid.Tile> FindPathAStar(Grid.Tile start, Grid.Tile goal, List<Zombie> zombiesToAvoid) {
@@ -279,7 +283,7 @@ public class Kim : CharacterController
             }
         }
         if (currentPath == null || currentPath.Count == 0) return;
-        Color pathColor = currentState == KimState.FleeingFromZombie ? Color.red : Color.green;
+        Color pathColor = isFleeing ? Color.red : Color.green;
         for (int i = 0; i < currentPath.Count; i++) {
             Vector3 position = Grid.Instance.WorldPos(currentPath[i]);
             Gizmos.color = pathColor;
