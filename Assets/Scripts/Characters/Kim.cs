@@ -10,7 +10,7 @@ public class Kim : CharacterController
     [SerializeField] float PathUpdateInterval = 0.5f;
 
     private float pathUpdateTimer = 0f;
-    private List<Grid.Tile> currentPath = new List<Grid.Tile>();
+    private List<Grid.Tile> currentPath = new();
     private KimState currentState = KimState.SeekingFinish;
     private Zombie closestZombie = null;
 
@@ -59,53 +59,34 @@ public class Kim : CharacterController
     {
         Grid.Tile targetTile = Grid.Instance.GetFinishTile();
         if (targetTile != null && myCurrentTile != null) {
-            currentPath = FindPathAStar(myCurrentTile, targetTile);
-            if (currentPath != null && currentPath.Count > 0) SetWalkBuffer(currentPath);
+            List<Grid.Tile> newPath = FindPathAStar(myCurrentTile, targetTile, Vector3.zero);
+            if (newPath != null && newPath.Count > 0) {
+                currentPath = newPath;
+                SetWalkBuffer(currentPath);
+            }
         }
     }
 
     void ExecuteFleeingFromZombie()
     {
         if (closestZombie == null || myCurrentTile == null) return;
-        Grid.Tile zombieTile = Grid.Instance.GetClosest(closestZombie.transform.position);
-        Grid.Tile safeTile = FindSafeTile(zombieTile);
-        if (safeTile != null) {
-            currentPath = FindPathAStar(myCurrentTile, safeTile);
-            if (currentPath != null && currentPath.Count > 0) SetWalkBuffer(currentPath);
-        }
-    }
-
-    Grid.Tile FindSafeTile(Grid.Tile dangerTile) {
-        Grid.Tile bestTile = null;
-        float maxDistance = 0f;
-        List<Grid.Tile> allTiles = Grid.Instance.GetTiles();
-        Vector3 dangerPos = Grid.Instance.WorldPos(dangerTile);
-        foreach (Grid.Tile tile in allTiles) {
-            if (tile.occupied) continue;
-            Vector3 tilePos = Grid.Instance.WorldPos(tile);
-            float distFromDanger = Vector3.Distance(tilePos, dangerPos);
-            float distFromKim = Vector3.Distance(tilePos, transform.position);
-            if (distFromDanger > ZombieDangerRadius && distFromDanger > maxDistance && distFromKim < ContextRadius) {
-                maxDistance = distFromDanger;
-                bestTile = tile;
+        Grid.Tile targetTile = Grid.Instance.GetFinishTile();
+        if (targetTile != null) {
+            List<Grid.Tile> newPath = FindPathAStar(myCurrentTile, targetTile, closestZombie.transform.position);
+            if (newPath != null && newPath.Count > 0) {
+                currentPath = newPath;
+                SetWalkBuffer(currentPath);
             }
         }
-        if (bestTile == null) {
-            Vector3 fleeDirection = (transform.position - dangerPos).normalized;
-            Vector3 fleeTarget = transform.position + fleeDirection * 5f;
-            bestTile = Grid.Instance.GetClosest(fleeTarget);
-        }
-        return bestTile;
     }
 
-    // A*
-    List<Grid.Tile> FindPathAStar(Grid.Tile start, Grid.Tile goal)
-    {
+    List<Grid.Tile> FindPathAStar(Grid.Tile start, Grid.Tile goal, Vector3 zombiePosition) {
         if (start == null || goal == null) return new List<Grid.Tile>();
-        List<AStarNode> openList = new List<AStarNode>();
-        HashSet<Grid.Tile> closedSet = new HashSet<Grid.Tile>();
-        Dictionary<Grid.Tile, AStarNode> allNodes = new Dictionary<Grid.Tile, AStarNode>();
-        AStarNode startNode = new AStarNode(start, null, 0, GetHeuristic(start, goal));
+        bool avoidZombie = zombiePosition != Vector3.zero;
+        List<AStarNode> openList = new();
+        HashSet<Grid.Tile> closedSet = new();
+        Dictionary<Grid.Tile, AStarNode> allNodes = new();
+        AStarNode startNode = new(start, null, 0, GetHeuristic(start, goal));
         openList.Add(startNode);
         allNodes[start] = startNode;
         while (openList.Count > 0) {
@@ -116,6 +97,11 @@ public class Kim : CharacterController
             List<Grid.Tile> neighbors = GetNeighbors(currentNode.tile);
             foreach (Grid.Tile neighborTile in neighbors) {
                 if (closedSet.Contains(neighborTile) || neighborTile.occupied) continue;
+                if (avoidZombie) {
+                    Vector3 tilePos = Grid.Instance.WorldPos(neighborTile);
+                    float distToZombie = Vector3.Distance(tilePos, zombiePosition);
+                    if (distToZombie < ZombieDangerRadius) continue;
+                }
                 float tentativeGCost = currentNode.gCost + GetDistance(currentNode.tile, neighborTile);
                 AStarNode neighborNode;
                 if (!allNodes.ContainsKey(neighborTile)) {
@@ -136,16 +122,16 @@ public class Kim : CharacterController
     }
 
     List<Grid.Tile> GetNeighbors(Grid.Tile tile) {
-        List<Grid.Tile> neighbors = new List<Grid.Tile>();
+        List<Grid.Tile> neighbors = new();
         Vector2Int[] directions = new Vector2Int[] {
-            new Vector2Int(1, 0),   // Right
-            new Vector2Int(-1, 0),  // Left
-            new Vector2Int(0, 1),   // Up
-            new Vector2Int(0, -1),  // Down
-            new Vector2Int(1, 1),   // Up-Right
-            new Vector2Int(1, -1),  // Down-Right
-            new Vector2Int(-1, 1),  // Up-Left
-            new Vector2Int(-1, -1)  // Down-Left
+            new(1, 0),   // Right
+            new(-1, 0),  // Left
+            new(0, 1),   // Up
+            new(0, -1),  // Down
+            new(1, 1),   // Up-Right
+            new(1, -1),  // Down-Right
+            new(-1, 1),  // Up-Left
+            new(-1, -1)  // Down-Left
         };
         foreach (Vector2Int dir in directions) {
             Grid.Tile neighbor = Grid.Instance.TryGetTile(new Vector2Int(tile.x + dir.x, tile.y + dir.y));
@@ -157,7 +143,7 @@ public class Kim : CharacterController
     AStarNode GetLowestFCostNode(List<AStarNode> openList) {
         AStarNode lowestNode = openList[0];
         foreach (AStarNode node in openList) {
-            if (node.fCost < lowestNode.fCost || (node.fCost == lowestNode.fCost && node.hCost < lowestNode.hCost)) lowestNode = node;
+            if (node.FCost < lowestNode.FCost || (node.FCost == lowestNode.FCost && node.hCost < lowestNode.hCost)) lowestNode = node;
         }
         return lowestNode;
     }
@@ -165,7 +151,7 @@ public class Kim : CharacterController
     float GetHeuristic(Grid.Tile a, Grid.Tile b) {
         int dx = Mathf.Abs(a.x - b.x);
         int dy = Mathf.Abs(a.y - b.y);
-        return (dx + dy) + (Mathf.Sqrt(2) - 2) * Mathf.Min(dx, dy);
+        return dx + dy + (Mathf.Sqrt(2) - 2) * Mathf.Min(dx, dy);
     }
 
     float GetDistance(Grid.Tile a, Grid.Tile b) {
@@ -176,7 +162,7 @@ public class Kim : CharacterController
     }
 
     List<Grid.Tile> ReconstructPath(AStarNode goalNode) {
-        List<Grid.Tile> path = new List<Grid.Tile>();
+        List<Grid.Tile> path = new();
         AStarNode currentNode = goalNode;
         while (currentNode != null) {
             path.Add(currentNode.tile);
@@ -191,7 +177,7 @@ public class Kim : CharacterController
         public AStarNode parent;
         public float gCost;
         public float hCost;
-        public float fCost { get { return gCost + hCost; } }
+        public float FCost { get { return gCost + hCost; } }
 
         public AStarNode(Grid.Tile tile, AStarNode parent, float gCost, float hCost) {
             this.tile = tile;
@@ -201,13 +187,9 @@ public class Kim : CharacterController
         }
     }
 
-    Vector3 GetEndPoint() {
-        return Grid.Instance.WorldPos(Grid.Instance.GetFinishTile());
-    }
-
     GameObject[] GetContextByTag(string aTag) {
         Collider[] context = Physics.OverlapSphere(transform.position, ContextRadius);
-        List<GameObject> returnContext = new List<GameObject>();
+        List<GameObject> returnContext = new();
         foreach (Collider c in context) if (c.transform.CompareTag(aTag)) returnContext.Add(c.gameObject);
         return returnContext.ToArray();
     }
