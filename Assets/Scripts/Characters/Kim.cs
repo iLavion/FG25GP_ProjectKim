@@ -1,18 +1,31 @@
 using System.Collections;
 using System.Collections.Generic;
-using System.Linq;
 using UnityEngine;
+#if UNITY_EDITOR
+using UnityEditor;
+#endif
 
 public class Kim : CharacterController
 {
-    [SerializeField] float ContextRadius = 10f;
-    [SerializeField] float ZombieDangerRadius = 5f;
-    [SerializeField] float PathUpdateInterval = 0.5f;
+    [Tooltip("Radius to scan for zombies and finish")]
+    [SerializeField] float ContextRadius = 15f;
+    [Tooltip("Seconds between path recalculations")]
+    [SerializeField] float PathUpdateInterval = 0.2f;
+    [Tooltip("Draw penalty/avoidance gizmos in Scene view")]
+    [SerializeField] bool ShowPenaltyVisualization = true;
+    [Tooltip("Tile radius around Kim to visualize penalties")]
+    [SerializeField] float VisualizationRange = 20f;
+    [Tooltip("Cost added at the hard avoid edge")]
+    [SerializeField] float SoftPenalty = 20f;
+    [Tooltip("Inside this distance tiles are blocked")]
+    [SerializeField] float HardAvoidDistance = 1.0f;
+    [Tooltip("Penalty fades in between this and hard avoid distance")]
+    [SerializeField] float SoftAvoidDistance = 2.5f;
 
     private float pathUpdateTimer = 0f;
     private List<Grid.Tile> currentPath = new();
     private KimState currentState = KimState.SeekingFinish;
-    private Zombie closestZombie = null;
+    private List<Zombie> zombiesInContext = new();
 
     private enum KimState
     {
@@ -38,13 +51,18 @@ public class Kim : CharacterController
 
     void UpdateStateMachine()
     {
-        closestZombie = GetClosest(GetContextByTag("Zombie"))?.GetComponent<Zombie>();
-        if (closestZombie != null) {
-            float distanceToZombie = Vector3.Distance(transform.position, closestZombie.transform.position);
-            if (distanceToZombie < ZombieDangerRadius) currentState = KimState.FleeingFromZombie;
-            else currentState = KimState.SeekingFinish;
-        } else currentState = KimState.SeekingFinish;
-
+        GameObject[] zombieObjects = GetContextByTag("Zombie");
+        zombiesInContext.Clear();
+        bool anyZombieDangerous = false;
+        foreach (GameObject zombieObj in zombieObjects) {
+            Zombie zombie = zombieObj.GetComponent<Zombie>();
+            if (zombie != null) {
+                zombiesInContext.Add(zombie);
+                float distanceToZombie = Vector3.Distance(transform.position, zombie.transform.position);
+                if (distanceToZombie < SoftAvoidDistance) anyZombieDangerous = true;
+            }
+        }
+        currentState = anyZombieDangerous ? KimState.FleeingFromZombie : KimState.SeekingFinish;
         switch (currentState) {
             case KimState.SeekingFinish:
                 ExecuteSeekingFinish();
@@ -59,7 +77,7 @@ public class Kim : CharacterController
     {
         Grid.Tile targetTile = Grid.Instance.GetFinishTile();
         if (targetTile != null && myCurrentTile != null) {
-            List<Grid.Tile> newPath = FindPathAStar(myCurrentTile, targetTile, Vector3.zero);
+            List<Grid.Tile> newPath = FindPathAStar(myCurrentTile, targetTile, zombiesInContext);
             if (newPath != null && newPath.Count > 0) {
                 currentPath = newPath;
                 SetWalkBuffer(currentPath);
@@ -69,10 +87,10 @@ public class Kim : CharacterController
 
     void ExecuteFleeingFromZombie()
     {
-        if (closestZombie == null || myCurrentTile == null) return;
+        if (zombiesInContext.Count == 0 || myCurrentTile == null) return;
         Grid.Tile targetTile = Grid.Instance.GetFinishTile();
         if (targetTile != null) {
-            List<Grid.Tile> newPath = FindPathAStar(myCurrentTile, targetTile, closestZombie.transform.position);
+            List<Grid.Tile> newPath = FindPathAStar(myCurrentTile, targetTile, zombiesInContext);
             if (newPath != null && newPath.Count > 0) {
                 currentPath = newPath;
                 SetWalkBuffer(currentPath);
@@ -80,12 +98,11 @@ public class Kim : CharacterController
         }
     }
 
-    List<Grid.Tile> FindPathAStar(Grid.Tile start, Grid.Tile goal, Vector3 zombiePosition) {
+    List<Grid.Tile> FindPathAStar(Grid.Tile start, Grid.Tile goal, List<Zombie> zombiesToAvoid) {
         if (start == null || goal == null) return new List<Grid.Tile>();
-        bool avoidZombie = zombiePosition != Vector3.zero;
-        float hardAvoidRadius = ZombieDangerRadius * 0.6f;
-        float softAvoidRadius = ZombieDangerRadius * 1.5f;
-        float softPenalty = 5f;
+        bool avoidZombies = zombiesToAvoid != null && zombiesToAvoid.Count > 0;
+        float hardAvoidRadius = HardAvoidDistance;
+        float softAvoidRadius = SoftAvoidDistance;
         List<AStarNode> openList = new();
         HashSet<Grid.Tile> closedSet = new();
         Dictionary<Grid.Tile, AStarNode> allNodes = new();
@@ -101,14 +118,25 @@ public class Kim : CharacterController
             foreach (Grid.Tile neighborTile in neighbors) {
                 if (closedSet.Contains(neighborTile) || neighborTile.occupied) continue;
                 float tentativeGCost = currentNode.gCost + GetDistance(currentNode.tile, neighborTile);
-                if (avoidZombie) {
+                if (avoidZombies) {
                     Vector3 tilePos = Grid.Instance.WorldPos(neighborTile);
-                    float distToZombie = Vector3.Distance(tilePos, zombiePosition);
-                    if (distToZombie < hardAvoidRadius) continue;
-                    if (distToZombie < softAvoidRadius) {
-                        float penaltyFactor = 1f - Mathf.InverseLerp(hardAvoidRadius, softAvoidRadius, distToZombie);
-                        tentativeGCost += softPenalty * penaltyFactor;
+                    bool shouldSkipTile = false;
+                    float totalPenalty = 0f;
+                    foreach (Zombie zombie in zombiesToAvoid) {
+                        if (zombie == null) continue;
+                        float distToZombie = Vector3.Distance(tilePos, zombie.transform.position);
+                        if (distToZombie < hardAvoidRadius) {
+                            shouldSkipTile = true;
+                            break;
+                        }
+                        if (distToZombie < softAvoidRadius) {
+                            float penaltyFactor = 1f - Mathf.InverseLerp(hardAvoidRadius, softAvoidRadius, distToZombie);
+                            totalPenalty += SoftPenalty * penaltyFactor;
+                        }
                     }
+                    
+                    if (shouldSkipTile) continue;
+                    tentativeGCost += totalPenalty;
                 }
                 AStarNode neighborNode;
                 if (!allNodes.ContainsKey(neighborTile)) {
@@ -143,15 +171,12 @@ public class Kim : CharacterController
         foreach (Vector2Int dir in directions) {
             Grid.Tile neighbor = Grid.Instance.TryGetTile(new Vector2Int(tile.x + dir.x, tile.y + dir.y));
             if (neighbor == null || neighbor.occupied) continue;
-
             bool isDiagonal = Mathf.Abs(dir.x) + Mathf.Abs(dir.y) == 2;
             if (isDiagonal) {
-                // Prevent cutting corners through walls by requiring side tiles to be clear
                 Grid.Tile sideA = Grid.Instance.TryGetTile(new Vector2Int(tile.x + dir.x, tile.y));
                 Grid.Tile sideB = Grid.Instance.TryGetTile(new Vector2Int(tile.x, tile.y + dir.y));
                 if ((sideA != null && sideA.occupied) || (sideB != null && sideB.occupied)) continue;
             }
-
             neighbors.Add(neighbor);
         }
         return neighbors;
@@ -211,21 +236,48 @@ public class Kim : CharacterController
         return returnContext.ToArray();
     }
 
-    GameObject GetClosest(GameObject[] aContext) {
-        float dist = float.MaxValue;
-        GameObject Closest = null;
-        foreach (GameObject z in aContext) {
-            float curDist = Vector3.Distance(transform.position, z.transform.position);
-            if (curDist < dist) {
-                dist = curDist;
-                Closest = z;
-            }
-        }
-        return Closest;
-    }
-
     private void OnDrawGizmos()
     {
+        if (ShowPenaltyVisualization && zombiesInContext.Count > 0 && Grid.Instance != null && myCurrentTile != null) {
+            float hardAvoidRadius = HardAvoidDistance;
+            float softAvoidRadius = SoftAvoidDistance;
+            int range = Mathf.CeilToInt(VisualizationRange);
+            for (int x = -range; x <= range; x++) {
+                for (int y = -range; y <= range; y++) {
+                    Vector2Int tilePos = new Vector2Int(myCurrentTile.x + x, myCurrentTile.y + y);
+                    Grid.Tile tile = Grid.Instance.TryGetTile(tilePos);
+                    if (tile != null && !tile.occupied) {
+                        Vector3 worldPos = Grid.Instance.WorldPos(tile);
+                        float totalPenalty = 0f;
+                        bool isBlocked = false;
+                        foreach (Zombie zombie in zombiesInContext) {
+                            if (zombie == null) continue;
+                            float distToZombie = Vector3.Distance(worldPos, zombie.transform.position);
+                            if (distToZombie < hardAvoidRadius) {
+                                isBlocked = true;
+                                break;
+                            }
+                            if (distToZombie < softAvoidRadius) {
+                                float penaltyFactor = Mathf.InverseLerp(softAvoidRadius, hardAvoidRadius, distToZombie);
+                                totalPenalty += SoftPenalty * penaltyFactor;
+                            }
+                        }
+                        if (isBlocked) {
+                            Gizmos.color = new Color(0.8f, 0f, 0f, 0.9f);
+                            Gizmos.DrawCube(worldPos, Vector3.one * 0.8f);
+                        } else if (totalPenalty > 0f) {
+                            float normalizedPenalty = Mathf.Clamp01(totalPenalty / SoftPenalty);
+                            Color penaltyColor = Color.Lerp(new Color(0f, 1f, 0f, 0.3f), new Color(1f, 0f, 0f, 0.6f), normalizedPenalty);
+                            Gizmos.color = penaltyColor;
+                            Gizmos.DrawCube(worldPos, Vector3.one * 0.6f);
+#if UNITY_EDITOR
+                            Handles.Label(worldPos + Vector3.up * 0.25f, totalPenalty.ToString("0.0"));
+#endif
+                        }
+                    }
+                }
+            }
+        }
         if (currentPath == null || currentPath.Count == 0) return;
         Color pathColor = currentState == KimState.FleeingFromZombie ? Color.red : Color.green;
         for (int i = 0; i < currentPath.Count; i++) {
@@ -237,9 +289,11 @@ public class Kim : CharacterController
                 Gizmos.DrawLine(position, nextPosition);
             }
         }
-        if (closestZombie != null) {
-            Gizmos.color = new Color(1f, 0f, 0f, 0.2f);
-            Gizmos.DrawWireSphere(closestZombie.transform.position, ZombieDangerRadius);
+        foreach (Zombie zombie in zombiesInContext) {
+            if (zombie != null) {
+                Gizmos.color = new Color(1f, 0f, 0f, 0.2f);
+                Gizmos.DrawWireSphere(zombie.transform.position, SoftAvoidDistance);
+            }
         }
         Gizmos.color = new Color(0f, 0f, 1f, 0.2f);
         Gizmos.DrawWireSphere(transform.position, ContextRadius);
